@@ -13,7 +13,7 @@ import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
 import android.hardware.camera2.params.BlackLevelPattern
-import android.media.DngCreator
+import android.hardware.camera2.DngCreator
 import android.media.Image
 import android.media.ImageReader
 import android.net.Uri
