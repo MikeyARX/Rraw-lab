@@ -53,6 +53,7 @@ class MainActivity : Activity() {
     private lateinit var cameraSpinner: Spinner
     private lateinit var formatSpinner: Spinner
     private lateinit var sizeSpinner: Spinner
+    private lateinit var probeButton: Button
     private lateinit var captureButton: Button
     private lateinit var copyButton: Button
     private lateinit var reportView: TextView
@@ -79,14 +80,13 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashRecorder()
         cameraManager = getSystemService(CameraManager::class.java)
         buildUi()
         startCameraThread()
-        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            safeInitializeLab()
-        } else {
-            requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION)
-        }
+        showPreviousCrash()
+        setStatus("DIAGNOSTIC SAFE MODE ready · camera not opened")
+
     }
 
     override fun onDestroy() {
@@ -98,9 +98,9 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == CAMERA_PERMISSION && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            safeInitializeLab()
+            runMetadataProbe()
         } else {
-            setStatus("Camera permission is required for R-RAW Lab.", true)
+            setStatus("Camera permission is required for the probe.", true)
         }
     }
 
@@ -148,6 +148,20 @@ class MainActivity : Activity() {
         sizeSpinner = labeledSpinner(controls, "Resolution")
         root.addView(controls)
 
+        probeButton = Button(this).apply {
+            text = "RUN CAMERA PROBE"
+        }
+        root.addView(
+            probeButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+            ).also {
+                it.topMargin = dp(8)
+                it.bottomMargin = dp(4)
+            }
+        )
+
         textureView = TextureView(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(260)).also {
                 it.topMargin = dp(10)
@@ -183,21 +197,41 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
+        probeButton.setOnClickListener {
+            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                runMetadataProbe()
+            } else {
+                requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION)
+            }
+        }
+
         cameraSpinner.onItemSelectedListener = simpleListener { position ->
             if (position in cameraIds.indices) {
                 selectedCameraId = cameraIds[position]
-                onCameraSelectionChanged()
+                loadSelectedCameraMetadataOnly()
             }
         }
-        formatSpinner.onItemSelectedListener = simpleListener { updateSizesForSelectedFormat() }
-        sizeSpinner.onItemSelectedListener = simpleListener { recreateCapturePipeline() }
-        captureButton.setOnClickListener { captureStill() }
+
+        formatSpinner.onItemSelectedListener = simpleListener {
+            updateSizesForSelectedFormat()
+            captureButton.isEnabled = false
+        }
+
+        sizeSpinner.onItemSelectedListener = simpleListener {
+            captureButton.isEnabled = false
+        }
+
+        captureButton.isEnabled = false
+        captureButton.setOnClickListener {
+            setStatus("Capture disabled in Diagnostic Safe Mode.", true)
+        }
+
         copyButton.setOnClickListener { copyReport() }
 
         textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) { openSelectedCamera() }
+            override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) = Unit
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) = Unit
-            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean { closeCamera(); return true }
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
         }
     }
@@ -220,6 +254,101 @@ class MainActivity : Activity() {
     private fun startCameraThread() {
         cameraThread = HandlerThread("RRAWCamera").also { it.start() }
         cameraHandler = Handler(cameraThread!!.looper)
+    }
+
+    private fun installCrashRecorder() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val crash = buildString {
+                    appendLine("Thread: ${thread.name}")
+                    appendLine("${throwable.javaClass.name}: ${throwable.message}")
+                    appendLine()
+                    append(throwable.stackTraceToString())
+                }
+
+                getSharedPreferences("rraw_diag", MODE_PRIVATE)
+                    .edit()
+                    .putString("last_crash", crash)
+                    .commit()
+            } catch (_: Throwable) {
+            }
+
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
+
+    private fun showPreviousCrash() {
+        val prefs = getSharedPreferences("rraw_diag", MODE_PRIVATE)
+        val crash = prefs.getString("last_crash", null) ?: return
+
+        reportView.text =
+            "PREVIOUS R-RAW LAB CRASH\n\n$crash\n\n" +
+            "Tap RUN CAMERA PROBE to continue diagnostics."
+
+        prefs.edit().remove("last_crash").apply()
+    }
+
+    private fun runMetadataProbe() {
+        try {
+            setStatus("Reading Camera2 metadata…")
+
+            closeCamera()
+
+            cameraIds.clear()
+            cameraIds.addAll(cameraManager.cameraIdList)
+
+            cameraSpinner.adapter = ArrayAdapter(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                cameraIds.map { "Camera $it" }
+            )
+
+            reportView.text = buildCapabilityReport()
+
+            if (cameraIds.isNotEmpty()) {
+                selectedCameraId = cameraIds.first()
+                loadSelectedCameraMetadataOnly()
+            }
+
+            captureButton.isEnabled = false
+
+            setStatus(
+                "Metadata probe complete · ${cameraIds.size} camera ID(s) · streams NOT opened"
+            )
+
+        } catch (t: Throwable) {
+            reportView.text =
+                "CAMERA METADATA PROBE FAILED\n\n" +
+                "${t.javaClass.name}: ${t.message}\n\n" +
+                t.stackTraceToString()
+
+            setStatus(
+                "Probe failed: ${t.javaClass.simpleName}: ${t.message}",
+                true
+            )
+        }
+    }
+
+    private fun loadSelectedCameraMetadataOnly() {
+        val id = selectedCameraId ?: return
+
+        try {
+            characteristics = cameraManager.getCameraCharacteristics(id)
+            updateFormatOptions()
+            captureButton.isEnabled = false
+
+            setStatus(
+                "Camera $id metadata loaded · stream opening disabled"
+            )
+
+        } catch (t: Throwable) {
+            setStatus(
+                "Camera $id metadata failed: ${t.javaClass.simpleName}: ${t.message}",
+                true
+            )
+        }
     }
 
     private fun initializeLab() {
@@ -272,7 +401,7 @@ class MainActivity : Activity() {
                 } ?: sb.appendLine("RAW14: unavailable on this OS/runtime")
                 appendFormatReport(sb, map, ImageFormat.RAW_SENSOR, "RAW_SENSOR (16-bit container)")
                 sb.appendLine()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 sb.appendLine("Camera $id error: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
