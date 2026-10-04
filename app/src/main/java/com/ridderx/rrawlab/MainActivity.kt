@@ -83,7 +83,7 @@ class MainActivity : Activity() {
         buildUi()
         startCameraThread()
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            initializeLab()
+            safeInitializeLab()
         } else {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION)
         }
@@ -98,9 +98,19 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == CAMERA_PERMISSION && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            initializeLab()
+            safeInitializeLab()
         } else {
             setStatus("Camera permission is required for R-RAW Lab.", true)
+        }
+    }
+
+    private fun safeInitializeLab() {
+        try {
+            initializeLab()
+        } catch (t: Throwable) {
+            setStatus("Initialization failed: ${t.javaClass.simpleName}: ${t.message}", true)
+            reportView.text =
+                "R-RAW LAB STARTUP ERROR\n\n${t.stackTraceToString()}"
         }
     }
 
@@ -285,10 +295,17 @@ class MainActivity : Activity() {
 
     private fun onCameraSelectionChanged() {
         val id = selectedCameraId ?: return
-        characteristics = cameraManager.getCameraCharacteristics(id)
-        updateFormatOptions()
-        closeCamera()
-        if (textureView.isAvailable) openSelectedCamera()
+        try {
+            characteristics = cameraManager.getCameraCharacteristics(id)
+            updateFormatOptions()
+            closeCamera()
+            if (textureView.isAvailable) openSelectedCamera()
+        } catch (t: Throwable) {
+            setStatus(
+                "Camera $id probe failed: ${t.javaClass.simpleName}: ${t.message}",
+                true
+            )
+        }
     }
 
     private fun updateFormatOptions() {
@@ -351,7 +368,15 @@ class MainActivity : Activity() {
         imageReader?.close()
         pendingImage?.close(); pendingImage = null; pendingResult = null
 
-        val reader = ImageReader.newInstance(size.width, size.height, option.format, 2)
+        val reader = try {
+            ImageReader.newInstance(size.width, size.height, option.format, 2)
+        } catch (t: Throwable) {
+            setStatus(
+                "RAW stream rejected: ${option.label} ${size.width}×${size.height} · ${t.javaClass.simpleName}: ${t.message}",
+                true
+            )
+            return
+        }
         imageReader = reader
         reader.setOnImageAvailableListener({ r ->
             val image = try { r.acquireNextImage() } catch (_: Throwable) { null }
