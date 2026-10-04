@@ -40,6 +40,13 @@ class MainActivity : Activity() {
     companion object {
         private const val CAMERA_PERMISSION = 100
         private const val RAW14_API = 37
+
+        private fun raw14FormatOrNull(): Int? {
+            if (Build.VERSION.SDK_INT < RAW14_API) return null
+            return runCatching {
+                ImageFormat::class.java.getField("RAW14").getInt(null)
+            }.getOrNull()
+        }
     }
 
     private lateinit var cameraManager: CameraManager
@@ -223,6 +230,7 @@ class MainActivity : Activity() {
         sb.appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         sb.appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         sb.appendLine("RAW14 API available in OS: ${Build.VERSION.SDK_INT >= RAW14_API}")
+        sb.appendLine("RAW14 constant available at runtime: ${raw14FormatOrNull() != null}")
         sb.appendLine("Openable camera IDs: ${cameraIds.joinToString()}")
         sb.appendLine()
 
@@ -249,8 +257,9 @@ class MainActivity : Activity() {
                 sb.appendLine("Active array: ${c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: "unknown"}")
                 sb.appendLine("Pixel array: ${c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE) ?: "unknown"}")
                 appendFormatReport(sb, map, ImageFormat.RAW12, "RAW12")
-                if (Build.VERSION.SDK_INT >= RAW14_API) appendFormatReport(sb, map, ImageFormat.RAW14, "RAW14")
-                else sb.appendLine("RAW14: OS API < 37")
+                raw14FormatOrNull()?.let {
+                    appendFormatReport(sb, map, it, "RAW14")
+                } ?: sb.appendLine("RAW14: unavailable on this OS/runtime")
                 appendFormatReport(sb, map, ImageFormat.RAW_SENSOR, "RAW_SENSOR (16-bit container)")
                 sb.appendLine()
             } catch (e: Exception) {
@@ -287,9 +296,11 @@ class MainActivity : Activity() {
         val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         formatOptions.clear()
         if (!map?.getOutputSizes(ImageFormat.RAW12).isNullOrEmpty()) formatOptions.add(FormatOption("RAW12 · packed 12-bit", ImageFormat.RAW12))
-        if (Build.VERSION.SDK_INT >= RAW14_API) {
-            val sizes = try { map?.getOutputSizes(ImageFormat.RAW14) } catch (_: Throwable) { null }
-            if (!sizes.isNullOrEmpty()) formatOptions.add(FormatOption("RAW14 · packed 14-bit", ImageFormat.RAW14))
+        raw14FormatOrNull()?.let { raw14 ->
+            val sizes = try { map?.getOutputSizes(raw14) } catch (_: Throwable) { null }
+            if (!sizes.isNullOrEmpty()) {
+                formatOptions.add(FormatOption("RAW14 · packed 14-bit", raw14))
+            }
         }
         if (!map?.getOutputSizes(ImageFormat.RAW_SENSOR).isNullOrEmpty()) formatOptions.add(FormatOption("RAW_SENSOR → DNG reference", ImageFormat.RAW_SENSOR, dng = true))
         if (formatOptions.isEmpty()) formatOptions.add(FormatOption("No RAW output advertised", -1))
@@ -442,7 +453,7 @@ class MainActivity : Activity() {
         val mode = when (option.format) {
             ImageFormat.RAW12 -> "RAW12"
             ImageFormat.RAW_SENSOR -> "RAWSENSOR"
-            else -> if (Build.VERSION.SDK_INT >= RAW14_API && option.format == ImageFormat.RAW14) "RAW14" else "RAW"
+            else -> if (raw14FormatOrNull()?.let { option.format == it } == true) "RAW14" else "RAW"
         }
         val base = "RRAW_CAM${cameraId}_${mode}_${size.width}x${size.height}_$stamp"
 
